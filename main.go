@@ -1,11 +1,18 @@
 package main
 
+//
+// speedwire decoder inspired by
+// https://github.com/snaptec/openWB/blob/master/packages/modules/sma_shm/speedwiredecoder.py
+//
+
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dmichael/go-multicast/multicast"
 	"github.com/godbus/dbus/introspect"
@@ -18,6 +25,8 @@ const (
 )
 
 var conn, err = dbus.SystemBus()
+
+var dbusConnected bool = false
 
 type singlePhase struct {
 	voltage float32 // Volts: 230,0
@@ -55,13 +64,11 @@ var victronValues = map[int]map[objectpath]dbus.Variant{
 }
 
 func (f objectpath) GetValue() (dbus.Variant, *dbus.Error) {
-	log.Debug("GetValue() called for ", f)
-	log.Debug("...returning ", victronValues[0][f])
+	log.Debugf("GetValue() called for %s. Returning %s", f, victronValues[0][f])
 	return victronValues[0][f], nil
 }
 func (f objectpath) GetText() (string, *dbus.Error) {
-	log.Debug("GetText() called for ", f)
-	log.Debug("...returning ", victronValues[1][f])
+	log.Debugf("GetText() called for %s. Returning %s", f, victronValues[1][f])
 	// Why does this end up ""SOMEVAL"" ... trim it I guess
 	return strings.Trim(victronValues[1][f].String(), "\""), nil
 }
@@ -80,7 +87,7 @@ func init() {
 	log.SetLevel(ll)
 }
 
-func main() {
+func initVictronValues() {
 	// Need to implement following paths:
 	// https://github.com/victronenergy/venus/wiki/dbus#grid-meter
 	// also in system.py
@@ -136,222 +143,246 @@ func main() {
 	//@400000005ecc11bf387b28ec     return sum(values) if values else None
 	//@400000005ecc11bf38b2bb7c TypeError: unsupported operand type(s) for +: 'int' and 'unicode'
 	//
-	victronValues[0]["/Ac/L1/Power"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L1/Power"] = dbus.MakeVariant("0 W")
-	victronValues[0]["/Ac/L2/Power"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L2/Power"] = dbus.MakeVariant("0 W")
-	victronValues[0]["/Ac/L3/Power"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L3/Power"] = dbus.MakeVariant("0 W")
 
-	victronValues[0]["/Ac/L1/Voltage"] = dbus.MakeVariant(230)
-	victronValues[1]["/Ac/L1/Voltage"] = dbus.MakeVariant("230 V")
-	victronValues[0]["/Ac/L2/Voltage"] = dbus.MakeVariant(230)
-	victronValues[1]["/Ac/L2/Voltage"] = dbus.MakeVariant("230 V")
-	victronValues[0]["/Ac/L3/Voltage"] = dbus.MakeVariant(230)
-	victronValues[1]["/Ac/L3/Voltage"] = dbus.MakeVariant("230 V")
-
-	victronValues[0]["/Ac/L1/Current"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L1/Current"] = dbus.MakeVariant("0 A")
-	victronValues[0]["/Ac/L2/Current"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L2/Current"] = dbus.MakeVariant("0 A")
-	victronValues[0]["/Ac/L3/Current"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L3/Current"] = dbus.MakeVariant("0 A")
-
-	victronValues[0]["/Ac/L1/Energy/Forward"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L1/Energy/Forward"] = dbus.MakeVariant("0 kWh")
-	victronValues[0]["/Ac/L2/Energy/Forward"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L2/Energy/Forward"] = dbus.MakeVariant("0 kWh")
-	victronValues[0]["/Ac/L3/Energy/Forward"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L3/Energy/Forward"] = dbus.MakeVariant("0 kWh")
-
-	victronValues[0]["/Ac/L1/Energy/Reverse"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L1/Energy/Reverse"] = dbus.MakeVariant("0 kWh")
-	victronValues[0]["/Ac/L2/Energy/Reverse"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L2/Energy/Reverse"] = dbus.MakeVariant("0 kWh")
-	victronValues[0]["/Ac/L3/Energy/Reverse"] = dbus.MakeVariant(0.0)
-	victronValues[1]["/Ac/L3/Energy/Reverse"] = dbus.MakeVariant("0 kWh")
-
-	basicPaths := []dbus.ObjectPath{
-		"/Connected",
-		"/CustomName",
-		"/DeviceInstance",
-		"/DeviceType",
-		"/ErrorCode",
-		"/FirmwareVersion",
-		"/Mgmt/Connection",
-		"/Mgmt/ProcessName",
-		"/Mgmt/ProcessVersion",
-		"/Position",
-		"/ProductId",
-		"/ProductName",
-		"/Serial",
+	for _, lookup := range actualLookup {
+		val := 0.0
+		victronValues[0][objectpath(lookup.Path)] = dbus.MakeVariant(val)
+		victronValues[1][objectpath(lookup.Path)] = dbus.MakeVariant(fmt.Sprintf("%.1f %s", val, lookup.Unit))
 	}
+}
 
-	updatingPaths := []dbus.ObjectPath{
-		"/Ac/L1/Power",
-		"/Ac/L2/Power",
-		"/Ac/L3/Power",
-		"/Ac/L1/Voltage",
-		"/Ac/L2/Voltage",
-		"/Ac/L3/Voltage",
-		"/Ac/L1/Current",
-		"/Ac/L2/Current",
-		"/Ac/L3/Current",
-		"/Ac/L1/Energy/Forward",
-		"/Ac/L2/Energy/Forward",
-		"/Ac/L3/Energy/Forward",
-		"/Ac/L1/Energy/Reverse",
-		"/Ac/L2/Energy/Reverse",
-		"/Ac/L3/Energy/Reverse",
+var basicPaths []dbus.ObjectPath = []dbus.ObjectPath{
+	"/Connected",
+	"/CustomName",
+	"/DeviceInstance",
+	"/DeviceType",
+	"/ErrorCode",
+	"/FirmwareVersion",
+	"/Mgmt/Connection",
+	"/Mgmt/ProcessName",
+	"/Mgmt/ProcessVersion",
+	"/Position",
+	"/ProductId",
+	"/ProductName",
+	"/Serial",
+}
+
+var receivedData bool = true
+
+func connectionAliveCheck() {
+	const timeout time.Duration = 30
+	previousState := receivedData
+
+	for {
+		// check if we processed data the last 15s
+		receivedData = false
+
+		// wait some time
+		time.Sleep(timeout * time.Second)
+
+		if previousState != receivedData {
+			if !receivedData {
+				log.Errorf("offline. ooops, no incoming data for %ds... setting state to disconnected", timeout)
+				publishDataString(0, "0", "/Connected")
+			} else {
+				log.Errorf("back online")
+				publishDataString(1, "1", "/Connected")
+			}
+		}
+
+		previousState = receivedData
 	}
+}
 
-	defer conn.Close()
+func multicastListener() {
+	multicast.Listen(address, msgHandler)
+	log.Panic("Error: We terminated.... how did we ever get here?")
+}
+
+func main() {
+
+	// run connection check function
+	go connectionAliveCheck()
+
+	// run multicast listener
+	go multicastListener()
+
+	// init paths
+	initVictronValues()
 
 	// Some of the victron stuff requires it be called grid.cgwacs... using the only known valid value (from the simulator)
 	// This can _probably_ be changed as long as it matches com.victronenergy.grid.cgwacs_*
-	reply, err := conn.RequestName("com.victronenergy.grid.cgwacs_ttyUSB0_di30_mb1",
-		dbus.NameFlagDoNotQueue)
+	defer conn.Close()
+	reply, err := conn.RequestName("com.victronenergy.grid.cgwacs_ttyUSB0_di30_mb1", dbus.NameFlagDoNotQueue)
 	if err != nil {
-		log.Panic("Something went horribly wrong in the dbus connection")
-		panic(err)
+		log.Error("Something went horribly wrong in the dbus connection. Will run in print only debug mode.")
+	} else {
+		if reply != dbus.RequestNameReplyPrimaryOwner {
+			log.Panic("name cgwacs_ttyUSB0_di30_mb1 already taken on dbus.")
+			os.Exit(1)
+		}
+
+		for i, s := range basicPaths {
+			log.Debugf("Registering dbus basic path #%d: %s", i, s)
+			conn.Export(objectpath(s), s, "com.victronenergy.BusItem")
+			conn.Export(introspect.Introspectable(intro), s, "org.freedesktop.DBus.Introspectable")
+		}
+
+		for _, lookup := range actualLookup {
+			s := dbus.ObjectPath(lookup.Path)
+			log.Debugf("Registering dbus update path: %s", s)
+			conn.Export(s, s, "com.victronenergy.BusItem")
+			conn.Export(introspect.Introspectable(intro), s, "org.freedesktop.DBus.Introspectable")
+		}
+
+		log.Info("Successfully connected to dbus and registered as a meter... Commencing reading of the SMA meter")
 	}
 
-	if reply != dbus.RequestNameReplyPrimaryOwner {
-		log.Panic("name cgwacs_ttyUSB0_di30_mb1 already taken on dbus.")
-		os.Exit(1)
-	}
+	dbusConnected = true
 
-	for i, s := range basicPaths {
-		log.Debug("Registering dbus basic path #", i, ": ", s)
-		conn.Export(objectpath(s), s, "com.victronenergy.BusItem")
-		conn.Export(introspect.Introspectable(intro), s, "org.freedesktop.DBus.Introspectable")
-	}
+	select {}
+}
 
-	for i, s := range updatingPaths {
-		log.Debug("Registering dbus update path #", i, ": ", s)
-		conn.Export(objectpath(s), s, "com.victronenergy.BusItem")
-		conn.Export(introspect.Introspectable(intro), s, "org.freedesktop.DBus.Introspectable")
-	}
+const OBIS_ID_COUNTER = 8
+const OBIS_ID_MEASURE = 4
+const OBIS_ID_VERSION = 0
 
-	log.Info("Successfully connected to dbus and registered as a meter... Commencing reading of the SMA meter")
+type LookupEntry struct {
+	Path       string
+	Unit       string
+	Divider    float64
+	Calculated bool
+}
 
-	multicast.Listen(address, msgHandler)
-	// This is a forever loop^^
-	panic("Error: We terminated.... how did we ever get here?")
+var actualLookup map[int]LookupEntry = map[int]LookupEntry{
+	// real measurements
+	(OBIS_ID_MEASURE | 1<<8): LookupEntry{"/Ac/Power", "W", 10.0, true},
+
+	(OBIS_ID_MEASURE | 21<<8): LookupEntry{"/Ac/L1/Power", "W", 10.0, true},
+	(OBIS_ID_MEASURE | 41<<8): LookupEntry{"/Ac/L2/Power", "W", 10.0, true},
+	(OBIS_ID_MEASURE | 61<<8): LookupEntry{"/Ac/L3/Power", "W", 10.0, true},
+
+	(OBIS_ID_MEASURE | 32<<8): LookupEntry{"/Ac/L1/Voltage", "V", 1000.0, false},
+	(OBIS_ID_MEASURE | 52<<8): LookupEntry{"/Ac/L2/Voltage", "V", 1000.0, false},
+	(OBIS_ID_MEASURE | 72<<8): LookupEntry{"/Ac/L3/Voltage", "V", 1000.0, false},
+
+	(OBIS_ID_MEASURE | 31<<8): LookupEntry{"/Ac/L1/Current", "A", 1000.0, false},
+	(OBIS_ID_MEASURE | 51<<8): LookupEntry{"/Ac/L2/Current", "A", 1000.0, false},
+	(OBIS_ID_MEASURE | 71<<8): LookupEntry{"/Ac/L3/Current", "A", 1000.0, false},
+
+	// counters
+	(OBIS_ID_COUNTER | 21<<8): LookupEntry{"/Ac/L1/Energy/Forward", "kWh", 3600000.0, false},
+	(OBIS_ID_COUNTER | 41<<8): LookupEntry{"/Ac/L2/Energy/Forward", "kWh", 3600000.0, false},
+	(OBIS_ID_COUNTER | 61<<8): LookupEntry{"/Ac/L3/Energy/Forward", "kWh", 3600000.0, false},
+
+	(OBIS_ID_COUNTER | 22<<8): LookupEntry{"/Ac/L1/Energy/Reverse", "kWh", 3600000.0, false},
+	(OBIS_ID_COUNTER | 42<<8): LookupEntry{"/Ac/L2/Energy/Reverse", "kWh", 3600000.0, false},
+	(OBIS_ID_COUNTER | 62<<8): LookupEntry{"/Ac/L3/Energy/Reverse", "kWh", 3600000.0, false},
+
+	(OBIS_ID_COUNTER | 1<<8): LookupEntry{"/Ac/Energy/Forward", "kWh", 3600000.0, false},
+	(OBIS_ID_COUNTER | 2<<8): LookupEntry{"/Ac/Energy/Reverse", "kWh", 3600000.0, false},
 }
 
 func msgHandler(src *net.UDPAddr, n int, b []byte) {
-	// This function will be called with every datagram sent by the SMA meter
-
-	// 0-28: SMA/SUSyID/SN/Uptime
-	log.Debug("----------------------")
-	log.Debug("Received datagram from meter")
-
-	// There are some broadcast packets caught by the multicast listener, that the meter is sending to 9522.
-	// See https://github.com/mitchese/shm-et340/issues/2
-	if 24681 != binary.BigEndian.Uint16(b[16:18]) {
-		log.Debug("The protocol ID didn't match 0x6069, it's not a meter update. ProtocolID: ", binary.BigEndian.Uint16(b[16:18]))
+	// decode header identifier
+	if bytes.Compare(b[0:4], []byte{'S', 'M', 'A', 0}) != 0 {
+		log.Error("invalid header, expected SMA")
 		return
 	}
 
-	if binary.BigEndian.Uint32(b[20:24]) == 0xffffffff {
-		log.Debug("Implausible serial, rejecting")
-		return
+	// decode uid
+	uid := binary.BigEndian.Uint32(b[4:8])
+	log.Debugf("got uid 0x%08X\n", uid)
+
+	// decode data length
+	dlen := int(binary.BigEndian.Uint16(b[12:14]))
+	log.Infof("processing incoming packet (len %d)\n", dlen)
+
+	// verify correct tag
+	tagExpected := 0x0010
+	tagReceived := int(binary.BigEndian.Uint16(b[14:16]))
+	if tagReceived != tagExpected {
+		log.Fatalf("invalid tag, got 0x%04X, expected 0x%04\n", tagReceived, tagExpected)
 	}
-	if n < 500 {
-		log.Debug("Received packet is probably too small. Size: ", n)
-		log.Debug("Serial: ", binary.BigEndian.Uint32(b[20:24]))
-		return
+
+	// verify protocol id
+	idExpected := 0x6069
+	idReceived := int(binary.BigEndian.Uint16(b[16:18]))
+	if idReceived != idExpected {
+		log.Fatalf("invalid protocol id, got 0x%04X, expected 0x%04\n", idReceived, idExpected)
 	}
 
-	log.Debug("Uid: ", binary.BigEndian.Uint32(b[4:8]))
-	log.Debug("Serial: ", binary.BigEndian.Uint32(b[20:24]))
+	// lets fetch all data we can and store it in a temporary map
+	var dataLookup map[int]int = make(map[int]int)
+	for position := 20; position < dlen; {
+		// new pointer to data
+		datablob := b[position:]
+		// fetch measurement id and type
+		measurementType := int(datablob[2])
+		measurementChannel := int(datablob[0])<<8 | int(datablob[1])
+		id := measurementChannel<<8 | measurementType
 
-	//              ...buy....                                 ...sell...  both in 0.1W, converted to W
-	powertot := ((float32(binary.BigEndian.Uint32(b[32:36])) - float32(binary.BigEndian.Uint32(b[52:56]))) / 10.0)
+		log.Tracef("decoded obis: type = %2d, channel = %2d -> id = 0x%06X\n", measurementType, measurementChannel, id)
 
-	// in watt seconds, convert to kWh
-	bezugtot := float64(binary.BigEndian.Uint64(b[40:48])) / 3600.0 / 1000.0
-	einsptot := float64(binary.BigEndian.Uint64(b[60:68])) / 3600.0 / 1000.0
+		// store data
+		if measurementType == OBIS_ID_COUNTER {
+			// data uses 8 bytes
+			dataLookup[id] = int(binary.BigEndian.Uint64(datablob[4 : 4+8]))
+		} else {
+			// data is using 4 bytes
+			dataLookup[id] = int(binary.BigEndian.Uint32(datablob[4 : 4+4]))
+		}
 
-	log.Debug("Total W: ", powertot)
-	log.Debug("Total Buy kWh: ", bezugtot)
-	log.Debug("Total Sell kWh: ", einsptot)
+		// increment
+		if measurementType == OBIS_ID_COUNTER {
+			position += 4 + 8
+		} else {
+			position += 4 + 4
+		}
+	}
 
-	log.Info(fmt.Sprintf("Meter update received: %.2f kWh bought and %.2f kWh sold, %.1f W currently flowing", bezugtot, einsptot, powertot))
-	updateVariant(float64(powertot), "W", "/Ac/Power")
-	updateVariant(float64(einsptot), "kWh", "/Ac/Energy/Reverse")
-	updateVariant(float64(bezugtot), "kWh", "/Ac/Energy/Forward")
+	// process incoming data, try to fetch all we need
+	for id, lookup := range actualLookup {
+		val, ok := dataLookup[id]
+		if ok {
+			// most of the data can be forwarded as it is, some needs to be calculated
+			if lookup.Calculated == false {
+				// this one is easy, forward data
+				valFloat := float64(val) / lookup.Divider
+				publishData(valFloat, lookup.Path, lookup.Unit)
+			} else {
+				// we need to calculate the data
+				// e.g. for power we need to calc it based on forward and reverse values
+				// check if we have the reverse value as well:
+				val2, ok2 := dataLookup[id+(1<<8)]
+				if !ok2 {
+					log.Errorf("failed to fetch reverse value for %s\n", lookup.Path)
+				} else {
+					forward := float64(val) / lookup.Divider
+					reverse := float64(val2) / lookup.Divider
+					sum := forward - reverse
+					publishData(sum, lookup.Path, lookup.Unit)
+				}
+			}
+		}
+	}
 
-	L1 := decodePhaseChunk(b[164:308])
-	L2 := decodePhaseChunk(b[308:452])
-	L3 := decodePhaseChunk(b[452:596])
-
-	log.Debug("+-----+-------------+---------------+---------------+")
-	log.Debug("|value|   L1 \t|     L2  \t|   L3  \t|")
-	log.Debug("+-----+-------------+---------------+---------------+")
-	log.Debug(fmt.Sprintf("|  V  | %8.2f \t| %8.2f \t| %8.2f \t|", L1.voltage, L2.voltage, L3.voltage))
-	log.Debug(fmt.Sprintf("|  A  | %8.2f \t| %8.2f \t| %8.2f \t|", L1.a, L2.a, L3.a))
-	log.Debug(fmt.Sprintf("|  W  | %8.2f \t| %8.2f \t| %8.2f \t|", L1.power, L2.power, L3.power))
-	log.Debug(fmt.Sprintf("| kWh | %8.2f \t| %8.2f \t| %8.2f \t|", L1.forward, L2.forward, L3.forward))
-	log.Debug(fmt.Sprintf("| kWh | %8.2f \t| %8.2f \t| %8.2f \t|", L1.reverse, L2.reverse, L3.reverse))
-	log.Debug("+-----+-------------+---------------+---------------+")
-
-	// L1
-	updateVariant(float64(L1.power), "W", "/Ac/L1/Power")
-	updateVariant(float64(L1.voltage), "V", "/Ac/L1/Voltage")
-	updateVariant(float64(L1.a), "A", "/Ac/L1/Current")
-	updateVariant(L1.forward, "kWh", "/Ac/L1/Energy/Forward")
-	updateVariant(L1.reverse, "kWh", "/Ac/L1/Energy/Reverse")
-
-	// L2
-	updateVariant(float64(L2.power), "W", "/Ac/L2/Power")
-	updateVariant(float64(L2.voltage), "V", "/Ac/L2/Voltage")
-	updateVariant(float64(L2.a), "A", "/Ac/L2/Current")
-	updateVariant(L2.forward, "kWh", "/Ac/L2/Energy/Forward")
-	updateVariant(L2.reverse, "kWh", "/Ac/L2/Energy/Reverse")
-
-	// L3
-	updateVariant(float64(L3.power), "W", "/Ac/L3/Power")
-	updateVariant(float64(L3.voltage), "V", "/Ac/L3/Voltage")
-	updateVariant(float64(L3.a), "A", "/Ac/L3/Current")
-	updateVariant(L3.forward, "kWh", "/Ac/L3/Energy/Forward")
-	updateVariant(L3.reverse, "kWh", "/Ac/L3/Energy/Reverse")
-
+	// tell the alive check that we got data!
+	receivedData = true
 }
 
-func decodePhaseChunk(b []byte) *singlePhase {
-
-	// why does this measure in 1/10 of watts?!
-	bezugW := float32(binary.BigEndian.Uint32(b[4:8])) / 10.0
-	einspeiseW := float32(binary.BigEndian.Uint32(b[24:28])) / 10.0
-
-	// this is in watt seconds ... chagne to kilo(100)watthour(3600)s:
-	bezugkWh := float64(binary.BigEndian.Uint64(b[12:20])) / 3600.0 / 1000.0
-	einspeisekWh := float64(binary.BigEndian.Uint64(b[32:40])) / 3600.0 / 1000.0
-
-	// not used, but leaving here for future
-	//bezugVA := float32(binary.BigEndian.Uint32(b[84:88])) / 10
-	//einspeiseVA := float32(binary.BigEndian.Uint32(b[104:108])) / 10
-
-	L := singlePhase{}
-	L.voltage = float32(binary.BigEndian.Uint32(b[132:136])) / 1000 // millivolts!
-	L.power = bezugW - einspeiseW
-	L.a = L.power / L.voltage
-	L.forward = bezugkWh
-	L.reverse = einspeisekWh
-
-	return &L
-	//log.Println(phase, "Buy: ", float32(binary.BigEndian.Uint32(b[4:8]))/10)
-	//log.Println(phase, "Sell: ", float32(binary.BigEndian.Uint32(b[24:28]))/10)
-	//return
+func publishDataString(value float64, text string, path string) {
+	log.Debugf("publishing %-30s = %10.2f [%s]\n", path, value, text)
+	if dbusConnected {
+		emit := make(map[string]dbus.Variant)
+		emit["Text"] = dbus.MakeVariant(text)
+		emit["Value"] = dbus.MakeVariant(value)
+		victronValues[0][objectpath(path)] = emit["Value"]
+		victronValues[1][objectpath(path)] = emit["Text"]
+		conn.Emit(dbus.ObjectPath(path), "com.victronenergy.BusItem.PropertiesChanged", emit)
+	}
 }
 
-func updateVariant(value float64, unit string, path string) {
-	emit := make(map[string]dbus.Variant)
-	emit["Text"] = dbus.MakeVariant(fmt.Sprintf("%.2f", value) + unit)
-	emit["Value"] = dbus.MakeVariant(float64(value))
-	victronValues[0][objectpath(path)] = emit["Value"]
-	victronValues[1][objectpath(path)] = emit["Text"]
-	conn.Emit(dbus.ObjectPath(path), "com.victronenergy.BusItem.PropertiesChanged", emit)
+func publishData(value float64, path string, unit string) {
+	publishDataString(value, fmt.Sprintf("%d%s", int(value), unit), path)
 }
