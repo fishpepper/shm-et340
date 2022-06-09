@@ -3,11 +3,7 @@ name: release_arm7
 on:
   push:
     branches:
-    - master
     - v*
-  pull_request:
-    branches:
-    - master
 
 jobs:
   build:
