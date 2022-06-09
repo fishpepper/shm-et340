@@ -1,9 +1,9 @@
 name: release_arm7
 
 on:
-  push:
-    branches:
-    - v*
+  create:
+    tags:
+      - v*
 
 jobs:
   build:
