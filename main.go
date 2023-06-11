@@ -64,13 +64,32 @@ var victronValues = map[int]map[objectpath]dbus.Variant{
 }
 
 func (f objectpath) GetValue() (dbus.Variant, *dbus.Error) {
-	log.Debugf("GetValue() called for %s. Returning %s", f, victronValues[0][f])
-	return victronValues[0][f], nil
+	var result dbus.Variant
+	if f == "/" {
+		// see https://github.com/mitchese/shm-et340/issues/9
+		// even though we initially did not expost '/'
+		// venus dbus2mqtt.py requested it anyways, resulting
+		// in an error/crashing. However returning some "random" data here
+		// seems to be fine with dbus2mqtt, though
+		result = dbus.MakeVariant(0)
+	} else {
+		result = victronValues[0][f]
+	}
+	log.Debugf("GetValue() called for %s. Returning %s", f, result)
+	return result, nil
 }
+
 func (f objectpath) GetText() (string, *dbus.Error) {
-	log.Debugf("GetText() called for %s. Returning %s", f, victronValues[1][f])
-	// Why does this end up ""SOMEVAL"" ... trim it I guess
-	return strings.Trim(victronValues[1][f].String(), "\""), nil
+	var result string
+	if f == "/" {
+		// see GetValue() for '/'
+		result = ""
+	} else {
+		// Why does this end up ""SOMEVAL"" ... trim it I guess
+		result = strings.Trim(victronValues[1][f].String(), "\"")
+	}
+	log.Debugf("GetText() called for %s. Returning %s", f, result)
+	return result, nil
 }
 
 func init() {
@@ -152,6 +171,7 @@ func initVictronValues() {
 }
 
 var basicPaths []dbus.ObjectPath = []dbus.ObjectPath{
+	"/",
 	"/Connected",
 	"/CustomName",
 	"/DeviceInstance",
